@@ -1,0 +1,66 @@
+# ============================================================
+# nginx/tasks/main.yml
+# Runs on frontend VM only
+# Installs Nginx, configures reverse proxy to backend:8080
+# ============================================================
+
+---
+- name: Install Nginx
+  apt:
+    name: nginx
+    state: present
+
+- name: Remove default Nginx site
+  file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Deploy EpicBook Nginx config
+  template:
+    src: epicbook.conf.j2
+    dest: /etc/nginx/sites-available/epicbook
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload nginx
+
+- name: Enable EpicBook site
+  file:
+    src: /etc/nginx/sites-available/epicbook
+    dest: /etc/nginx/sites-enabled/epicbook
+    state: link
+  notify: reload nginx
+
+- name: Validate Nginx configuration
+  command: nginx -t
+  changed_when: false
+  register: nginx_test
+
+- name: Show Nginx config test result
+  debug:
+    msg: "{{ nginx_test.stderr }}"
+
+- name: Start and enable Nginx
+  systemd:
+    name: nginx
+    state: started
+    enabled: yes
+
+- name: Verify Nginx is running
+  command: systemctl is-active nginx
+  register: nginx_status
+  changed_when: false
+
+- name: Show Nginx status
+  debug:
+    msg: "Nginx status: {{ nginx_status.stdout }}"
+
+- name: Confirm port 80 is listening
+  wait_for:
+    host: localhost
+    port: 80
+    timeout: 10
+
+- name: Print port 80 status
+  debug:
+    msg: "Port 80 is open and Nginx is serving traffic"

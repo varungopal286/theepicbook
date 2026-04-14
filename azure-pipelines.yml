@@ -1,0 +1,254 @@
+# ============================================================
+# app-pipeline.yml — EpicBook Capstone
+#
+# Organization:  https://dev.azure.com/varungopal286
+# Project:       EpicBook
+# Agent Pool:    linux-hosted-agent
+# Repo:          github.com/varungopal286/theepicbook
+#
+# What this pipeline does:
+#   1. Downloads VM IPs artifact from the Infra pipeline
+#   2. Installs Ansible on the agent
+#   3. Downloads SSH private key from Secure Files
+#   4. Updates Ansible inventory with actual VM IP
+#   5. Runs Ansible playbook to configure the VM
+#   6. Verifies EpicBook is live on the public IP
+#
+# Single VM: Nginx (port 80) + Node.js (port 8080) + MySQL
+# ============================================================
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  name: linux-hosted-agent
+
+variables:
+  - group: epicbook-secrets
+
+stages:
+
+# ------------------------------------------------------------
+# STAGE 1 — PREPARE
+# Download IPs artifact, install Ansible, get SSH key
+# ------------------------------------------------------------
+  - stage: Prepare
+    displayName: 'Prepare'
+    jobs:
+      - job: PrepareJob
+        displayName: 'Install Ansible and Prepare Inventory'
+        steps:
+
+          - checkout: self
+            clean: true
+            displayName: 'Checkout theepicbook repo'
+
+          # Download the VM IPs published by the Infra pipeline
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download VM IPs from Infra Pipeline'
+            inputs:
+              buildType: 'specific'
+              project: 'EpicBook'
+              definition: 'varungopal286.infra-epicbook'
+              buildVersionToDownload: 'latest'
+              artifactName: 'infra-outputs'
+              targetPath: '$(Pipeline.Workspace)/infra-outputs'
+
+          - script: |
+              echo "============================================"
+              echo "  VM IP from Infra Pipeline"
+              echo "============================================"
+              cat $(Pipeline.Workspace)/infra-outputs/vm_ips.txt
+              echo "============================================"
+            displayName: 'Show VM IP'
+
+          # Install Ansible on the agent
+          - script: |
+              sudo apt-get update -y
+              sudo apt-get install -y ansible
+              ansible --version
+              echo "Ansible installed successfully"
+            displayName: 'Install Ansible'
+
+          # Download SSH private key from Secure Files
+          - task: DownloadSecureFile@1
+            displayName: 'Download SSH Private Key'
+            name: sshPrivateKey
+            inputs:
+              secureFile: 'epicbook-vm'
+
+          # Set correct permissions on the private key
+          # SSH requires the key file to be owner-readable only
+          - script: |
+              mkdir -p ~/.ssh
+              cp $(sshPrivateKey.secureFilePath) ~/.ssh/epicbook-vm
+              chmod 600 ~/.ssh/epicbook-vm
+              echo "SSH private key permissions set"
+            displayName: 'Configure SSH Private Key'
+
+          # Read the IPs from artifact and update Ansible inventory
+          - script: |
+              source $(Pipeline.Workspace)/infra-outputs/vm_ips.txt
+
+              echo "EpicBook VM IP : $FRONTEND_IP"
+
+              # Write updated inventory.ini with actual IP (no leading spaces in heredoc)
+              INVENTORY=$(Build.SourcesDirectory)/ansible/inventory.ini
+              printf '[frontend]\n%s ansible_user=azureuser ansible_ssh_private_key_file=~/.ssh/epicbook-vm\n\n[backend]\n%s ansible_user=azureuser ansible_ssh_private_key_file=~/.ssh/epicbook-vm\n\n[all:vars]\nansible_ssh_common_args='"'"'-o StrictHostKeyChecking=no'"'"'\nbackend_ip=127.0.0.1\ndb_password=%s\n' \
+                "$FRONTEND_IP" "$FRONTEND_IP" "$(db_password)" > "$INVENTORY"
+
+              echo "Inventory updated successfully"
+              cat "$INVENTORY"
+            displayName: 'Update Ansible Inventory with VM IP'
+
+          # Wait for VM to be fully ready before Ansible connects
+          - script: |
+              source $(Pipeline.Workspace)/infra-outputs/vm_ips.txt
+
+              echo "Waiting for VM to be fully ready..."
+              sleep 30
+
+              echo "Checking SSH to EpicBook VM ($FRONTEND_IP)..."
+              for i in {1..10}; do
+                if ssh -i ~/.ssh/epicbook-vm \
+                  -o StrictHostKeyChecking=no \
+                  -o ConnectTimeout=10 \
+                  azureuser@$FRONTEND_IP "echo 'SSH OK'" 2>/dev/null; then
+                  echo "VM is ready"
+                  break
+                fi
+                echo "Attempt $i: VM not ready yet, waiting 15s..."
+                sleep 15
+              done
+            displayName: 'Wait for VM to be Ready'
+
+# ------------------------------------------------------------
+# STAGE 2 — CONFIGURE
+# Run Ansible playbook against both VMs
+# ------------------------------------------------------------
+  - stage: Configure
+    displayName: 'Configure'
+    dependsOn: Prepare
+    jobs:
+      - job: ConfigureJob
+        displayName: 'Run Ansible Playbook'
+        steps:
+
+          - checkout: self
+            clean: true
+            displayName: 'Checkout theepicbook repo'
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download VM IPs from Infra Pipeline'
+            inputs:
+              buildType: 'specific'
+              project: 'EpicBook'
+              definition: 'varungopal286.infra-epicbook'
+              buildVersionToDownload: 'latest'
+              artifactName: 'infra-outputs'
+              targetPath: '$(Pipeline.Workspace)/infra-outputs'
+
+          - script: |
+              sudo apt-get update -y
+              sudo apt-get install -y ansible
+            displayName: 'Install Ansible'
+
+          - task: DownloadSecureFile@1
+            displayName: 'Download SSH Private Key'
+            name: sshPrivateKey
+            inputs:
+              secureFile: 'epicbook-vm'
+
+          - script: |
+              mkdir -p ~/.ssh
+              cp $(sshPrivateKey.secureFilePath) ~/.ssh/epicbook-vm
+              chmod 600 ~/.ssh/epicbook-vm
+            displayName: 'Configure SSH Private Key'
+
+          # Rebuild inventory with correct IP and variables
+          - script: |
+              source $(Pipeline.Workspace)/infra-outputs/vm_ips.txt
+
+              INVENTORY=$(Build.SourcesDirectory)/ansible/inventory.ini
+              printf '[frontend]\n%s ansible_user=azureuser ansible_ssh_private_key_file=~/.ssh/epicbook-vm\n\n[backend]\n%s ansible_user=azureuser ansible_ssh_private_key_file=~/.ssh/epicbook-vm\n\n[all:vars]\nansible_ssh_common_args='"'"'-o StrictHostKeyChecking=no'"'"'\nbackend_ip=127.0.0.1\ndb_password=%s\n' \
+                "$FRONTEND_IP" "$FRONTEND_IP" "$(db_password)" > "$INVENTORY"
+
+              echo "Inventory ready"
+              cat "$INVENTORY"
+            displayName: 'Rebuild Ansible Inventory'
+
+          # Run the full Ansible playbook
+          - script: |
+              cd $(Build.SourcesDirectory)/ansible
+
+              ansible-playbook site.yml \
+                -i inventory.ini \
+                -v
+              ANSIBLE_EXIT=$?
+
+              if [ $ANSIBLE_EXIT -ne 0 ]; then
+                echo "##[error]Ansible playbook FAILED with exit code $ANSIBLE_EXIT"
+                exit $ANSIBLE_EXIT
+              fi
+
+              echo "Ansible playbook completed successfully"
+            displayName: 'Run Ansible Playbook'
+
+# ------------------------------------------------------------
+# STAGE 3 — VERIFY
+# Check EpicBook is accessible via frontend public IP
+# ------------------------------------------------------------
+  - stage: Verify
+    displayName: 'Verify'
+    dependsOn: Configure
+    jobs:
+      - job: VerifyJob
+        displayName: 'Verify EpicBook Deployment'
+        steps:
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download VM IPs'
+            inputs:
+              buildType: 'specific'
+              project: 'EpicBook'
+              definition: 'varungopal286.infra-epicbook'
+              buildVersionToDownload: 'latest'
+              artifactName: 'infra-outputs'
+              targetPath: '$(Pipeline.Workspace)/infra-outputs'
+
+          # HTTP health check — confirm EpicBook is live
+          - script: |
+              source $(Pipeline.Workspace)/infra-outputs/vm_ips.txt
+
+              echo "Waiting for application to be ready..."
+              sleep 15
+
+              echo "Running HTTP health check on http://$FRONTEND_IP ..."
+              HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 http://$FRONTEND_IP)
+
+              echo "HTTP Status: $HTTP_STATUS"
+
+              if [ "$HTTP_STATUS" -eq 200 ]; then
+                echo "============================================"
+                echo "  EPICBOOK IS LIVE!"
+                echo "  URL: http://$FRONTEND_IP"
+                echo "============================================"
+              else
+                echo "Health check failed — HTTP $HTTP_STATUS"
+                echo "Check Nginx and Node.js logs on the VMs"
+                exit 1
+              fi
+            displayName: 'HTTP Health Check'
+
+          - script: |
+              source $(Pipeline.Workspace)/infra-outputs/vm_ips.txt
+              echo "============================================"
+              echo "  DEPLOYMENT SUMMARY"
+              echo "============================================"
+              echo "Status       : SUCCESS"
+              echo "Frontend URL : http://$FRONTEND_IP"
+              echo "Backend IP   : $BACKEND_IP"
+              echo "============================================"
+            displayName: 'Deployment Summary'

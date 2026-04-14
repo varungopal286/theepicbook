@@ -1,0 +1,63 @@
+# ============================================================
+# common/tasks/main.yml
+# Runs on both frontend and backend VMs
+# Installs: system updates, Node.js v17 via NVM, npm
+# ============================================================
+
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Upgrade all packages
+  apt:
+    upgrade: yes
+
+- name: Install required system packages
+  apt:
+    name:
+      - curl
+      - git
+      - unzip
+      - build-essential
+    state: present
+
+- name: Install NVM for azureuser
+  become_user: azureuser
+  shell: |
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  args:
+    creates: /home/azureuser/.nvm/nvm.sh
+
+- name: Install Node.js v17 via NVM
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    nvm install 17
+    nvm use 17
+    nvm alias default 17
+  args:
+    executable: /bin/bash
+
+- name: Install PM2 globally
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    npm install -g pm2
+  args:
+    executable: /bin/bash
+
+- name: Print Node.js version
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    node --version
+  args:
+    executable: /bin/bash
+  register: node_version
+  changed_when: false
+
+- name: Show Node.js version
+  debug:
+    msg: "Node.js version: {{ node_version.stdout }}"

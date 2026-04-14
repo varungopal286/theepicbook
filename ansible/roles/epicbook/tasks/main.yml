@@ -1,0 +1,85 @@
+# ============================================================
+# epicbook/tasks/main.yml
+# Runs on backend VM only
+# Clones app, configures DB connection, starts with PM2
+# ============================================================
+
+---
+- name: Clone EpicBook application repository
+  git:
+    repo: https://github.com/varungopal286/theepicbook.git
+    dest: /home/azureuser/theepicbook
+    version: main
+    force: yes
+
+- name: Set ownership of app directory
+  file:
+    path: /home/azureuser/theepicbook
+    owner: azureuser
+    group: azureuser
+    recurse: yes
+
+- name: Update config.json with database credentials
+  copy:
+    content: |
+      {
+        "development": {
+          "username": "root",
+          "password": "{{ db_password }}",
+          "database": "bookstore",
+          "host": "127.0.0.1",
+          "dialect": "mysql"
+        }
+      }
+    dest: /home/azureuser/theepicbook/config/config.json
+    owner: azureuser
+    group: azureuser
+    mode: '0644'
+
+- name: Install Node.js dependencies
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    cd /home/azureuser/theepicbook
+    npm install
+  args:
+    executable: /bin/bash
+
+- name: Stop existing PM2 process if running
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    pm2 delete epicbook || true
+  args:
+    executable: /bin/bash
+  ignore_errors: yes
+
+- name: Start EpicBook application with PM2
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    cd /home/azureuser/theepicbook
+    pm2 start server.js --name epicbook
+    pm2 save
+  args:
+    executable: /bin/bash
+
+- name: Verify application is running on port 8080
+  wait_for:
+    host: localhost
+    port: 8080
+    timeout: 30
+
+- name: Print application status
+  become_user: azureuser
+  shell: |
+    source /home/azureuser/.nvm/nvm.sh
+    pm2 list
+  args:
+    executable: /bin/bash
+  register: pm2_status
+  changed_when: false
+
+- name: Show PM2 status
+  debug:
+    msg: "{{ pm2_status.stdout }}"

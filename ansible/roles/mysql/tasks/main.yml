@@ -1,0 +1,92 @@
+# ============================================================
+# mysql/tasks/main.yml
+# Runs on backend VM only
+# Installs MySQL, creates bookstore DB, runs seed scripts
+# ============================================================
+
+---
+- name: Install MySQL server
+  apt:
+    name:
+      - mysql-server
+      - mysql-client
+      - python3-mysqldb
+    state: present
+
+- name: Start and enable MySQL service
+  systemd:
+    name: mysql
+    state: started
+    enabled: yes
+
+- name: Set MySQL root password
+  mysql_user:
+    name: root
+    password: "{{ db_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    host: localhost
+    state: present
+
+- name: Create bookstore database
+  mysql_db:
+    name: bookstore
+    state: present
+    login_user: root
+    login_password: "{{ db_password }}"
+
+- name: Clone EpicBook repo to get seed files
+  git:
+    repo: https://github.com/varungopal286/theepicbook.git
+    dest: /tmp/theepicbook-seed
+    version: main
+    force: yes
+
+- name: Run database schema script
+  mysql_db:
+    name: bookstore
+    state: import
+    target: /tmp/theepicbook-seed/db/BuyTheBook_Schema.sql
+    login_user: root
+    login_password: "{{ db_password }}"
+
+- name: Run author seed script
+  mysql_db:
+    name: bookstore
+    state: import
+    target: /tmp/theepicbook-seed/db/author_seed.sql
+    login_user: root
+    login_password: "{{ db_password }}"
+
+- name: Run books seed script
+  mysql_db:
+    name: bookstore
+    state: import
+    target: /tmp/theepicbook-seed/db/books_seed.sql
+    login_user: root
+    login_password: "{{ db_password }}"
+
+- name: Allow MySQL to accept connections from frontend VM
+  mysql_user:
+    name: root
+    password: "{{ db_password }}"
+    host: "%"
+    priv: "bookstore.*:ALL"
+    login_user: root
+    login_password: "{{ db_password }}"
+    state: present
+
+- name: Bind MySQL to all interfaces
+  lineinfile:
+    path: /etc/mysql/mysql.conf.d/mysqld.cnf
+    regexp: '^bind-address'
+    line: 'bind-address = 0.0.0.0'
+  notify: restart mysql
+
+- name: Print MySQL status
+  command: systemctl is-active mysql
+  register: mysql_status
+  changed_when: false
+
+- name: Show MySQL status
+  debug:
+    msg: "MySQL status: {{ mysql_status.stdout }}"

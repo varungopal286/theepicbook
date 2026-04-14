@@ -1,0 +1,21 @@
+# ============================================================
+# site.yml — EpicBook Master Playbook
+#
+# Single VM setup — all roles run on the same host.
+# Run order:
+#   1. common  — system updates, Node.js, npm
+#   2. mysql   — MySQL install + bookstore DB + seed data
+#   3. epicbook — clone app, configure, start with PM2
+#   4. nginx   — install + reverse proxy (port 80 → localhost:8080)
+# ============================================================
+
+---
+- name: Configure EpicBook VM
+  hosts: backend
+  become: true
+  gather_facts: true
+  roles:
+    - common
+    - mysql
+    - epicbook
+    - nginx
